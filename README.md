@@ -472,6 +472,9 @@ Overrides, highest priority first:
 * Harness: DeepSeek Harness (`@deepseek-ai/dsh-llm-deepseek` 0.1.5-rc.2)
 * Model: `deepseek-flash`, thinking enabled, `reasoning_effort: max`
 * Scale: one long-lived session, ~680 turns, ~3,500 tool calls
+* Working copy this note was produced from: `the working copy`
+  — the scripts are meant to be run from the repo root and read the archives under
+  `~/.dsh/sessions/`
 * Prior art: *DeepSeek-R1 Thoughtology: Let's think about LLM reasoning*
   ([arXiv:2504.07128](https://arxiv.org/abs/2504.07128)) — rumination, the "sweet spot"
   of thought length, and the 5-gram repetition measure used above
