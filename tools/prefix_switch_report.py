@@ -22,11 +22,21 @@ For consecutive requests in one session, ordered by time:
     delta = totalTokens(N+1) - totalTokens(N)
     a "shrinking step" is  delta <= -MIN_DROP   (default 10,000 tokens)
 
-⚠️ **Compaction must be excluded.** A context compaction legitimately cuts the payload
-from hundreds of thousands of tokens to a few thousand. Those steps are not prefix
-switches caused by the client; they are the client discarding history on purpose. Any
-step within `--compact-window` seconds of a `compaction/*` event is skipped and counted
-separately.
+⚠️ **Compaction must be excluded, and the exclusion is positional, not a time window.**
+A context compaction legitimately cuts the payload from hundreds of thousands of tokens to
+a few thousand (one recorded case: 792k -> 16k). That shrink appears in the **first
+request after the compaction**, however long the user was idle in between — so that is
+exactly the step skipped, and no window constant is involved.
+
+Both window choices are wrong in one direction. Too wide (30 min) swallows real flips that
+happen after a compaction; too narrow (2 min) misses the legitimate shrink when the user
+walks away for ten minutes after one. Measured on the deployment: all 22 exclusions fell
+within 87s of a compaction **and all 22 were the first request after it**, so the exact
+test reproduces every case a window got right.
+
+⚠️ **The newest line is provisional.** Archives are append-only and a turn in progress
+keeps appending steps, so the most recent boundary's figure can still change while the
+turn is being written. Re-run after the turn ends before quoting it.
 
 Usage
 -----
@@ -98,20 +108,49 @@ def scan():
     return steps, comps
 
 
-def report(steps, comps, min_drop: int, compact_window: float, detail: bool):
+def report(steps, comps, min_drop: int, detail: bool):
     by_comp = defaultdict(list)
     for sess, when, _t in comps:
         if when:
             by_comp[sess].append(when)
 
-    def near_compaction(sess, when) -> bool:
+    # Which steps exist per session, for the "is this the first request after a
+    # compaction?" test below.
+    times_by_sess = defaultdict(list)
+    for s_ in steps:
+        times_by_sess[s_["session"]].append(s_["at"])
+
+    def is_first_request_after_compaction(sess, when) -> bool:
+        """Exact criterion; the causal position, with no arbitrary time window.
+
+        A compaction lowers the payload once, and that shows up in the **first request
+        after it** however long the user was idle in between. So instead of "within N
+        seconds of a compaction" we ask: is there any request between the latest
+        compaction and this one? If not, this is that first request.
+
+        ⚠️ Why this replaced a window (a review finding, 2026-09-23): the window was
+        1800s, which would also swallow *real* flips happening up to half an hour after a
+        compaction. Narrowing it to 120s (also suggested) fixes that direction but opens
+        the opposite one: after a compaction, a user who walks away for ten minutes
+        produces that same legitimate shrink later than 120s, and it would be counted as
+        a prefix switch. Measured on the deployment: all 22 exclusions are within 87s of
+        a compaction **and all 22 are the first request after it** - so the exact test
+        reproduces every case the window got right, without the window.
+        """
+        latest = None
         for c in by_comp.get(sess, []):
-            if abs((when - c).total_seconds()) <= compact_window:
-                return True
-        return False
+            if c <= when and (latest is None or c > latest):
+                latest = c
+        if latest is None:
+            return False
+        for t in times_by_sess.get(sess, []):
+            if latest < t < when:
+                return False
+        return True
 
     prev = {}
     shrinks, skipped = [], 0
+    last_compaction_skip = []
     total_steps = 0
     for s in steps:
         total_steps += 1
@@ -122,19 +161,27 @@ def report(steps, comps, min_drop: int, compact_window: float, detail: bool):
         delta = s["total"] - p["total"]
         if delta > -min_drop:
             continue
-        if near_compaction(s["session"], s["at"]):
+        if is_first_request_after_compaction(s["session"], s["at"]):
             skipped += 1
+            last_compaction_skip.append(s["at"])
             continue
         shrinks.append({"session": s["session"], "at": s["at"], "before": p["total"],
                         "after": s["total"], "delta": delta, "turn": s["turn"]})
 
     print("=== prefix switches (request got smaller) ===")
     print(f"  criterion : totalTokens(N+1) - totalTokens(N) <= -{min_drop:,}")
-    print(f"  excluded  : steps within {compact_window:.0f}s of a compaction event "
-          f"({skipped} skipped - those are the client discarding history, not a switch)")
+    print(f"  excluded  : the first request after a compaction event "
+          f"({skipped} skipped - that is the client discarding history, not a switch)")
     print(f"  requests scanned: {total_steps:,}")
     print(f"  shrinking steps : {len(shrinks)}")
     if shrinks:
+        print()
+        # ⚠️ The newest boundary is provisional: archives are append-only and a turn in
+        # progress keeps appending steps (and its current step's usage can still be
+        # rewritten). Measured 2026-09-23: turn 704 read -13,438 once the turn settled,
+        # where a mid-write read of the same boundary gave a smaller figure. Re-run after
+        # the turn ends before quoting the last line.
+        print("    (the last line is provisional if a turn is still running - re-run later)")
         print()
         for r in shrinks:
             t = r["at"].strftime("%m-%d %H:%M:%S")
@@ -147,8 +194,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="prefix switches: requests that got smaller")
     ap.add_argument("--min-drop", type=int, default=10000,
                     help="a shrinking step must lose at least this many tokens (default 10000)")
-    ap.add_argument("--compact-window", type=float, default=1800.0,
-                    help="ignore steps within N seconds of a compaction (default 1800)")
+    # (no --compact-window: the exclusion is exact, see is_first_request_after_compaction)
     ap.add_argument("--session", default="", help="only sessions whose id contains this")
     ap.add_argument("--since", default="", help="only steps after this local time")
     ap.add_argument("--sessions", default="", help="archive root (default ~/.dsh/sessions)")
@@ -173,7 +219,7 @@ def main() -> int:
     if args.session:
         print(f"(only sessions containing {args.session})")
 
-    report(steps, comps, args.min_drop, args.compact_window, True)
+    report(steps, comps, args.min_drop, True)
     return 0
 
 

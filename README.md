@@ -282,9 +282,19 @@ after, one turn:    166,777 -> 189,916        (+23,139 over 16 steps, never nega
 
 `tools/prefix_switch_report.py` measures the flip directly: count requests whose payload
 is **smaller** than the previous one by more than a threshold (default 10,000 tokens),
-excluding steps near a compaction event (a compaction legitimately cuts the payload —
-one recorded case went 792k → 16k; that is the client discarding history, not a prefix
-switch).
+excluding **the first request after a compaction event** (a compaction legitimately cuts
+the payload — one recorded case went 792k → 16k; that is the client discarding history,
+not a prefix switch). The exclusion is that exact position rather than a time window: a
+window wide enough to be safe (30 min) also swallows real flips happening after a
+compaction, and a narrow one (2 min) misses the same legitimate shrink when the user walks
+away after a compaction. Measured on this deployment, all 22 exclusions were within 87s of
+a compaction **and all 22 were the first request after it**, so the exact test reproduces
+every case a window got right.
+
+The last line of the table is **provisional while a turn is running** — archives are
+append-only and a turn in progress keeps appending, so the newest boundary's figure can
+change (measured: one boundary read smaller mid-write than its settled value). Re-run
+after the turn ends before quoting it.
 
 ```
 criterion: totalTokens(N+1) - totalTokens(N) <= -10,000
