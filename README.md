@@ -306,7 +306,7 @@ after the turn ends before quoting it.
 
 ```
 criterion: totalTokens(N+1) - totalTokens(N) <= -10,000
-session REDACTED-SESSION, 2026-09-23, 112 requests scanned -> 7 shrinking steps
+one session, 2026-09-23, 112 requests scanned -> 7 shrinking steps
 
 11:32:31  turn 684   310,072 -> 142,563   (-167,509)   \  pre-patch: the payload
 11:33:10  turn 685   311,237 -> 143,098   (-168,139)    |  repeatedly halves and
@@ -472,9 +472,8 @@ Overrides, highest priority first:
 * Harness: DeepSeek Harness (`@deepseek-ai/dsh-llm-deepseek` 0.1.5-rc.2)
 * Model: `deepseek-flash`, thinking enabled, `reasoning_effort: max`
 * Scale: one long-lived session, ~680 turns, ~3,500 tool calls
-* Working copy this note was produced from: `the working copy`
-  — the scripts are meant to be run from the repo root and read the archives under
-  `~/.dsh/sessions/`
+* Run the scripts from the repository root. They read session archives from
+  `~/.dsh/sessions/` (override with `--sessions` or `DSH_SESSIONS_DIR`).
 * Prior art: *DeepSeek-R1 Thoughtology: Let's think about LLM reasoning*
   ([arXiv:2504.07128](https://arxiv.org/abs/2504.07128)) — rumination, the "sweet spot"
   of thought length, and the 5-gram repetition measure used above
