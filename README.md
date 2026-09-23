@@ -4,8 +4,10 @@
 to do with it.**
 
 A field note from running a long-lived assistant on DeepSeek Harness + `deepseek-flash`
-with tools enabled. Everything below is measured on real traffic; the scripts to
-reproduce each number are in this repo.
+with tools enabled. Everything below is measured on real traffic. **The scripts that
+produce each number are in this repo; the session archives they read are not** — the
+transcripts are private, so the tools are written to run against your own archives under
+`~/.dsh/sessions/`. Numbers quoted here are from one deployment and will differ.
 
 ---
 
@@ -41,7 +43,7 @@ Three things this is **not**:
 
 ### How often, and in what shape
 
-`tools/silence_shape_report.py` reads the session archives:
+`tools/silence_shape_report.py` reads the session archives (`--empty-only`):
 
 ```
 date     events  turns  EMPTY  other   shape
@@ -50,13 +52,23 @@ date     events  turns  EMPTY  other   shape
 09-23        19     10     19      0   sticky (>=2 in a row) (longest run 5)
 ```
 
-**31 swallowed responses** in one long session over ~3 days. Note the two shapes:
+Two notes so the table is not read as curated: it lists **only days with an
+`EMPTY_RESPONSE`** — run the tool without `--empty-only` and other retry reasons
+(transport, server) add four more days that never show this symptom. And these events
+are **not all from one session**: 29 belong to the long session discussed here, 1 and 1
+to two others. The shape is what generalizes, not the count.
+
+**29 swallowed responses** in one long session over ~3 days. Note the two shapes:
 sometimes a single isolated swallow, sometimes *the same step swallowed 4–6 times in a
 row*. When a step is swallowed repeatedly and the retry budget (5) runs out, the user
 experiences a turn that simply never answers. In the recorded case the same user
 message was then re-sent, and the assistant — which cannot see retry events — read the
 two adjacent user messages as *"the user sent two messages"*. The failure silently
 rewrote the shape of its own context.
+
+The reason this was worth chasing to the bottom: **in the empty turns, someone was
+sitting at the screen waiting.** Everything below is machinery; that is the part that
+made it urgent.
 
 ### The tail of a swallowed chain
 
@@ -104,13 +116,15 @@ repetition is.
 
 ### What the data here does and does not support
 
-Measured on 31 swallowed vs. 713 successful chains (`--shape`, plus offline analysis):
+`tools/rumination_compare.py --session <id>` (this counts **every retried attempt**,
+not only `EMPTY_RESPONSE`; 29 of the 31 in this session were `EMPTY_RESPONSE`):
 
 | comparison | swallowed | successful |
 |---|---|---|
-| median chain length | 2,431 chars | 2,559 chars |
-| 5-gram repetition, **all data** | **19.7%** | 12.2% |
-| 5-gram repetition, **matched within turn** (13 pairs) | **20.7%** | **20.8%** |
+| median chain length, all data | 2,431 chars | 2,557 chars |
+| 5-gram repetition, **all data** | **20.7%** | 13.5% |
+| **matched within a step** (13 pairs) - repetition | **20.7%** | **20.8%** |
+| **matched within a step** (13 pairs) - length | 2,526 chars | 2,167 chars |
 
 * **Matched within a turn** (same input, different sample): *nothing separates them.*
   Five different text metrics all failed to distinguish a swallowed attempt from the
@@ -189,8 +203,10 @@ alternatives: always-on is right 59.9% of the time, always-off 40.1%, previous-s
 > their reasoning. Everything older is stripped.**
 
 * no prediction needed — the disagreement between v1 and v2 disappears;
-* **prefix switches drop to 0** (v2 had 187; an "always start false" variant would have
-  had 818 — each one a chance to invalidate the cache);
+* the expensive flip disappears: within a turn the payload only grows (measured over 16
+  consecutive steps, every delta positive), where v1 and v2 alternated between two sizes
+  twice per turn — each alternation invalidating the cached prefix
+  (see *Measured effect* below for the numbers, and for what does **not** go to zero);
 * the fuel is cut where it is thickest: the long, reflective reasoning lives on the
   *final reply* side of a segment, and none of it enters history.
 
@@ -218,23 +234,63 @@ turn 2 begins        [t1 tool step, t1 reply, t2 tool step]-> false, false, TRUE
 
 ### Measured effect
 
-```
-before   280,003 tokens/request (median-ish, 40 turns)
-after    143,000 tokens/request
-```
-
-And the shape of a long working segment becomes flat instead of a sawtooth:
+**Do not quote a single "before" number.** The pre-patch request size was bimodal, not
+flat: it alternated between roughly 143k and roughly 357k *between adjacent turns* (and
+sometimes *within* one turn). A mean over that period describes neither mode. Measure a
+matched pair instead — consecutive turns, same session, restart in between:
 
 ```
-before (v2, restart pending)   turn 698            357,268
-after  (v3)                    turn 699  step 1    166,777
-                                        step 2    167,253
-                                        ...
-                                        step 16   189,916     +23k over 16 steps
+turn 698 (last full turn before v3, tool-dense)  step 1   357,268
+                                                 step 2   359,555
+turn 699 (first full turn under v3, 16 steps)    step 1   166,777
+                                                 step 2   167,253
+                                                 ...
+                                                 step 16  189,916
 ```
 
-Roughly **half the tokens**, with no observed loss of task continuity. Flat growth
-within a segment; no mid-turn steps.
+So: **~357k → ~167k at the same point in a working turn** (about half), and the growth
+within the turn becomes monotonic instead of a sawtooth:
+
+```
+before, one turn:   142,563 -> 311,237        (+168,700 mid-turn, twice back and forth)
+after, one turn:    166,777 -> 189,916        (+23,139 over 16 steps, never negative)
+```
+
+`tools/prefix_switch_report.py` measures the flip directly: count requests whose payload
+is **smaller** than the previous one by more than a threshold (default 10,000 tokens),
+excluding steps near a compaction event (a compaction legitimately cuts the payload —
+one recorded case went 792k → 16k; that is the client discarding history, not a prefix
+switch).
+
+```
+criterion: totalTokens(N+1) - totalTokens(N) <= -10,000
+session REDACTED-SESSION, 2026-09-23, 112 requests scanned -> 7 shrinking steps
+
+11:32:31  turn 684   310,072 -> 142,563   (-167,509)   \  pre-patch: the payload
+11:33:10  turn 685   311,237 -> 143,098   (-168,139)    |  repeatedly halves and
+11:47:15  turn 691   318,616 -> 147,670   (-170,946)    |  doubles, twice per turn
+11:48:36  turn 691   324,393 -> 150,120   (-174,273)    |
+12:07:08  turn 694   341,727 -> 159,025   (-182,702)   /
+12:41:48  turn 699   359,555 -> 166,777   (-192,778)   <- v3 takes effect; first request
+                                                          strips the whole history (once)
+13:05:15  turn 700   189,916 -> 179,907    (-10,009)   <- turn boundary: the previous
+                                                          turn's tool reasoning leaves
+```
+
+**Be precise about the zero.** "Prefix switches drop to 0" would be wrong, and an earlier
+draft of this note said it. What actually happens:
+
+* **mid-turn flips are gone** — within a turn the payload only grows (16 steps measured,
+  every delta positive). This was the expensive failure mode: two ±170k flips per turn,
+  each one invalidating the cached prefix;
+* **a small step down remains at every turn boundary**, equal to the previous turn's
+  tool-step reasoning (measured: −10,009, −1,967, then +292 and +214 where the new user
+  message outweighed the stripped reasoning). That step is **inherent** to any rule that
+  strips past reasoning: the moment the segment boundary passes, those messages change,
+  so the cached prefix ends there. It is one step per turn instead of two large flips,
+  and it is bounded by how much reasoning the turn produced.
+
+Roughly **half the tokens**, with no observed loss of task continuity.
 
 ---
 
@@ -270,6 +326,20 @@ per day (returning / calls = per 1000):
   09-19    0/62   =   0.0      09-23   13/281  =  46.3
   09-20   28/746  =  37.5
 ```
+
+**Cross-day rates are not directly comparable** — that table spans 0 to 232 per 1000
+over two weeks. Comparing them requires holding the *kind of work* constant: a day spent
+reading files scores high by construction, a day spent running commands scores low. So:
+
+* compare **matched windows** (same session, similar work), not arbitrary days;
+* prefer the pre/post pair around a change over a time series.
+
+And a correction to an earlier draft of this note: it explained a pre-patch decline in the
+rate as "the sampling structure changed" — several session branches sharing one history,
+each counting the same repeat. That explanation **was tested and does not hold**: looking
+at a single branch's own rate, the series is not monotonic (it falls 136 → 0 from 09-10 to
+09-19, then rises to 107–221 on 09-20 … 09-22), and branch dilution cannot produce the
+rise. **It is recorded here as unexplained**, not as a finding.
 
 Three traps were hit while building this, all of which produced confidently wrong reads:
 
@@ -317,6 +387,12 @@ python3 patches/patch_backfill.py --revert               # undo
 
 # 4. watch the side effect
 python3 tools/repeat_labor_report.py
+
+# 5. count payload shrinkages (prefix invalidations)
+python3 tools/prefix_switch_report.py
+
+# 6. compare the chains of swallowed vs. successful attempts
+python3 tools/rumination_compare.py --session <id>
 ```
 
 The patch targets `@deepseek-ai/dsh-llm-deepseek` and refuses to run if the anchors it
