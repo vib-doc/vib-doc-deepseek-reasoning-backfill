@@ -101,6 +101,47 @@ def repetition_rate(text: str, n: int = 5) -> float:
     return 100.0 * (1 - len(set(grams)) / len(grams))
 
 
+# Self-referential wording. ⚠️ LANGUAGE-SPECIFIC: this list is the Chinese one used in the
+# measured deployment. Measuring English traffic with it would report ~0 and look like a
+# clean negative result. Pass your own list with --self-ref-words FILE (one per line).
+DEFAULT_SELF_REF = [
+    "我自己", "我的状态", "我在想", "我在判断", "我是不是", "我有没有",
+    "我意识到", "我决定", "我的判断", "我在做", "我这个人",
+]
+
+
+def metrics(text: str, self_ref=None) -> dict:
+    """Every metric that was computed when making the claim, in one place.
+
+    The point of having them all here: the claim in the note is that *none* of them
+    separates a swallowed attempt from a retry that succeeded, on the same input. That
+    claim is only as good as the metrics behind it, so each one is reproducible.
+    """
+    text = text or ""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    run = best = 1 if lines else 0
+    for i in range(1, len(lines)):
+        run = run + 1 if lines[i] == lines[i - 1] else 1
+        best = max(best, run)
+    tail = lines[int(len(lines) * 0.8):] or [""]
+    from collections import Counter
+    tail_share = 100.0 * max(Counter(tail).values()) / len(tail)
+    flat = re.sub(r"\s+", "", text)
+    shingles = [flat[i:i + 20] for i in range(0, len(flat) - 19, 5)] if len(flat) >= 20 else []
+    shingle20 = 100.0 * (1 - len(set(shingles)) / len(shingles)) if shingles else 0.0
+    words = self_ref if self_ref is not None else DEFAULT_SELF_REF
+    selfref = 1000.0 * sum(text.count(w) for w in words) / max(len(text), 1)
+    return {
+        "chars": len(text),
+        "lines": len(lines),
+        "max_line_run": best,
+        "tail_repeat_%": tail_share,
+        "shingle20_%": shingle20,
+        "ngram5_%": repetition_rate(text, 5),
+        "selfref_per_1000": selfref,
+    }
+
+
 def collect():
     """-> (swallowed, ok). Each entry: (session, turn, step, chain_text).
 
@@ -159,11 +200,19 @@ def main() -> int:
     ap.add_argument("--session", default="", help="only sessions whose id contains this")
     ap.add_argument("--pairs-only", action="store_true", help="skip the all-data comparison")
     ap.add_argument("--sessions", default="", help="archive root (default ~/.dsh/sessions)")
+    ap.add_argument("--self-ref-words", default="",
+                    help="file of self-referential markers, one per line (default: built-in Chinese list)")
     args = ap.parse_args()
 
     global SESSIONS
     if args.sessions:
         SESSIONS = Path(args.sessions)
+
+    words = None
+    if args.self_ref_words:
+        with open(args.self_ref_words, encoding="utf-8") as fh:
+            words = [ln.strip() for ln in fh if ln.strip()]
+        print(f"(self-referential markers: {len(words)} from {args.self_ref_words})")
 
     swallowed, ok = collect()
     if args.session:
@@ -201,20 +250,43 @@ def main() -> int:
     print(f"  usable pairs: {len(matched)}")
     if not matched:
         return 0
-    print(f"\n  {'session':<14}{'turn/step':<12}{'swallowed':>10}{'success':>9}{'rep% bad':>10}{'rep% good':>11}")
-    rb, rg = [], []
+    # Every metric, both groups, over the SAME pairs - this is the table the note's
+    # strongest claim rests on, so it is printed in full rather than summarised.
+    bad_m, good_m = [], []
     for (sess, turn, step), v in sorted(matched, key=lambda kv: kv[0][1]):
-        b, g = v["bad"][0], v["good"][0]
-        x, y = repetition_rate(b), repetition_rate(g)
-        rb.append(x); rg.append(y)
-        print(f"  {sess[:12]:<14}t{turn}/s{step:<8}{len(b):>10,}{len(g):>9,}{x:>10.1f}{y:>11.1f}")
-    print(f"\n  median 5-gram repetition: swallowed {median(rb):.1f}%  vs  successful {median(rg):.1f}%")
-    print("  median chain length     : swallowed "
-          f"{median([len(v['bad'][0]) for _, v in matched]):,.0f}  vs  successful "
-          f"{median([len(v['good'][0]) for _, v in matched]):,.0f}")
-    print("\n  Reading: if these two rows look alike, the chain carries no warning sign -")
-    print("  the failure is a sampling event at the reasoning/content boundary, not a")
-    print("  property of what the model was thinking.")
+        bad_m.append(metrics(v["bad"][0], words))
+        good_m.append(metrics(v["good"][0], words))
+
+    keys = list(bad_m[0].keys())
+    print(f"\n  {'metric':<20}{'swallowed':>12}{'successful':>12}{'separates?':>12}")
+    separated = []
+    for k in keys:
+        mb = median(m[k] for m in bad_m)
+        mg = median(m[k] for m in good_m)
+        # A metric "separates" if the group medians differ by more than 20% of the larger
+        # one. Deliberately crude: with tens of samples, a finer test would overclaim.
+        hi = max(abs(mb), abs(mg))
+        sep = hi > 0 and abs(mb - mg) / hi > 0.20
+        if sep:
+            separated.append(k)
+        print(f"  {k:<20}{mb:>12.2f}{mg:>12.2f}{('YES' if sep else 'no'):>12}")
+    print(f"\n  metrics compared: {len(keys)}   separating (>20% apart): {len(separated)}"
+          + (f"  -> {separated}" if separated else ""))
+    print("  two of them are degenerate on this data and are reported for completeness:")
+    print("    tail_repeat_%   ~100 in BOTH groups - the tail of every chain ends in the")
+    print("                    same short self-prompt loop, so it measures nothing here;")
+    print("    max_line_run    ~32 vs ~35 - that long run IS the loop, and it is present in")
+    print("                    successful chains too, which is why it cannot be a detector.")
+    print()
+    if separated:
+        print("  Reading: at least one metric does separate the two groups on matched input -")
+        print("  that is a lead worth chasing, not a finished result. Check it on more pairs")
+        print("  before believing it.")
+    else:
+        print("  Reading: none of the metrics separates a swallowed attempt from a retry of")
+        print("  the same step that succeeded. The chain carries no warning sign - the failure")
+        print("  is a sampling event at the reasoning/content boundary, not a property of what")
+        print("  the model was thinking.")
     return 0
 
 

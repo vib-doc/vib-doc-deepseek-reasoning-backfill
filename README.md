@@ -125,12 +125,36 @@ not only `EMPTY_RESPONSE`; 29 of the 31 in this session were `EMPTY_RESPONSE`):
 | 5-gram repetition, **all data** | **20.7%** | 13.5% |
 | **matched within a step** (13 pairs) - repetition | **20.7%** | **20.8%** |
 | **matched within a step** (13 pairs) - length | 2,526 chars | 2,167 chars |
+| matched within a step - all seven metrics | see below | see below |
 
 * **Matched within a turn** (same input, different sample): *nothing separates them.*
-  Five different text metrics all failed to distinguish a swallowed attempt from the
-  retry of the same step that succeeded. **This is the strongest single result here**:
-  at the level of the visible chain, there is no warning sign. Re-sampling is what
-  fixes it.
+  `rumination_compare.py` scores both members of every pair on **seven metrics** — chain
+  length, line count, longest repeated-line run, tail repetition share, 20-char shingle
+  repetition, 5-gram repetition (the paper's rumination measure), and self-referential
+  word density — then reports how many differ by more than 20% of the larger median.
+  Measured: **0 of 7**.
+
+  ```
+  metric                 swallowed  successful  separates?
+  chars                    2526.00     2167.00          no
+  lines                      85.00       97.00          no
+  max_line_run               32.00       35.00          no
+  tail_repeat_%             100.00      100.00          no
+  shingle20_%                 7.02        6.25          no
+  ngram5_%                   20.68       20.78          no
+  selfref_per_1000            0.58        0.60          no
+  ```
+
+  Two of the seven are degenerate on this data and are reported for completeness:
+  `tail_repeat_%` is ~100 in **both** groups because every chain ends in the same short
+  self-prompt loop, and `max_line_run` (~32 vs ~35) *is* that loop — present in successful
+  chains too, which is exactly why it cannot serve as a detector. The self-referential
+  word list is language-specific (Chinese here); pass `--self-ref-words` for other
+  languages, or that row reports ~0 and looks like a clean negative result when it is only
+  a mismatched word list.
+
+  **This is the strongest single result here**: at the level of the visible chain, there
+  is no warning sign. Re-sampling is what fixes it.
 * **Across the whole dataset**: swallowed contexts carry ~1.6–3.3× the density of
   self-referential wording, and ~1.6× the reasoning repetition. That says *which kinds
   of conversations* swallow more often — long, reflective, self-referential ones — not
