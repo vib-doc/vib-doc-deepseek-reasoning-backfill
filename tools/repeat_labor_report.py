@@ -23,21 +23,41 @@ visible text and no tool call). For every tool call we build a key:
   * run-like tools   -> ("run",  normalized command text)
   * anything else    -> (tool name, sorted arguments)
 
-A key seen in **more than one segment, within the same session** is a cross-segment
-repeat. Two grouping choices matter:
+Two numbers come out of that, and only one of them is usable as a trend:
+
+  * **groups** - keys occurring in more than one segment. A group is a property of the
+    whole history, so the total keeps growing as the archive grows. Useful as a stock
+    description, useless as a trend.
+  * **returning calls per 1000 calls** - a call whose key already appeared in an earlier
+    segment *of the same session*. Denominator = calls that day, so it does not drift
+    upward with archive size. **Use this one to judge the side effect.**
+
+Two grouping choices matter, and both were wrong in the first draft of this tool:
 
   * **per session, not global** - two windows reading the same file is two agents doing
     their own work, not one agent repeating itself (global grouping inflated the count
-    ~6x). Both numbers are printed so older observations stay comparable;
+    ~6x, 1524 vs 244);
   * **polling excluded** - `ls`, `ps`, `git status`, health checks are *supposed* to
-    repeat. This filter matched nothing until 2026-09-23 (a literal `\b` instead of a
+    repeat. That filter matched nothing until 2026-09-23 (a literal `\b` instead of a
     word boundary, a `^` anchor, and a curl branch requiring `/dev/null`).
 
-Read it as a trend, not a verdict
----------------------------------
-Reading the same file twice is not automatically waste: the file may have changed, or the
-second read may be a deliberate re-check. This counts **traces**; a human decides what
-they mean. What matters is the direction after deploying the change.
+A third trap, worth recording because it produced a confidently wrong reading: an earlier
+version printed a per-day table where a group's "spans days" credit went to every day
+except its last. **The last day of any group could therefore never receive credit**, so
+new repeats were booked against old rows - a table that says "it is getting worse" no
+matter what happens. It has been replaced by the per-day rate above.
+
+Recommended usage
+-----------------
+Fix a baseline, then re-run over the window since the last check and compare **rates**:
+
+    baseline (one window, before the change): 50 cross-segment groups
+    every few days:  --since <last check time>   -> look at groups/returning per 1000 calls
+    do NOT compare group totals across runs
+
+Read it as a trend, not a verdict: reading the same file twice is not automatically waste
+(the file may have changed, or the second read may be a deliberate re-check). This counts
+**traces**; a human decides what they mean.
 
 Usage
 -----
@@ -61,13 +81,13 @@ from pathlib import Path
 SESSIONS = Path.home() / ".dsh" / "sessions"
 TZ = timezone(timedelta(hours=8))
 
-# 哪些工具算"读/跑"（重复它们才可能是浪费）
+# Which tools count as "read / run" (repeating those may be waste)
 READ_TOOLS = {"read", "read_file", "view", "cat", "Read"}
 RUN_TOOLS = {"bash", "shell", "exec", "run", "terminal"}
 
 
 def _load_events(path: Path):
-    """一条会话档案 → [事件]。只留判定要用的类型。"""
+    """One session archive -> [events], keeping only the types we judge on."""
     raw = subprocess.run(["zstd", "-dc", str(path)], capture_output=True).stdout.decode("utf-8", "replace")
     out = []
     for ln in raw.splitlines():
@@ -92,7 +112,7 @@ def _is_final_reply(e) -> bool:
 
 
 def _key(name: str, args: str):
-    """把一次调用压成一个可比较的键。"""
+    """Compress one tool call into a comparable key."""
     try:
         a = json.loads(args) if isinstance(args, str) else (args or {})
     except Exception:
@@ -108,7 +128,7 @@ def _key(name: str, args: str):
 
 
 def scan(since: datetime | None = None):
-    calls = []          # (time, seg_id, session, name, key)
+    calls = []          # (time, seg_id, session, name, key, returning)
     for slug in sorted(os.listdir(SESSIONS)) if SESSIONS.exists() else []:
         sd = SESSIONS / slug
         if not sd.is_dir():
@@ -118,9 +138,20 @@ def scan(since: datetime | None = None):
             if not f.exists():
                 continue
             seg = 0
+            # `returning` = this call redoes something an EARLIER SEGMENT of the same
+            # session already did. Computed per call on purpose: a per-group table
+            # credits "spans days" to every day except the last, so the last day of any
+            # group can never receive credit and new repeats get booked against old rows
+            # (a table that reads "getting worse" whatever happens). Group totals are
+            # also a property of the whole history and grow with the archive; a per-call
+            # incidence has a stable denominator and can be read per day.
+            closed: set = set()          # keys used by earlier segments
+            seg_keys: set = set()        # keys used by the current segment
             for e in _load_events(f):
                 if e.get("type") == "assistant/message":
                     if _is_final_reply(e):
+                        closed |= seg_keys      # seal this segment into history
+                        seg_keys = set()
                         seg += 1
                     continue
                 da = e.get("data") or {}
@@ -128,23 +159,27 @@ def scan(since: datetime | None = None):
                 when = datetime.fromtimestamp(ts, TZ) if ts else None
                 if since and when and when < since:
                     continue
-                calls.append((when, f"{d}#{seg}", d, da.get("name") or "?", _key(da.get("name") or "?", da.get("arguments"))))
+                name = da.get("name") or "?"
+                key = _key(name, da.get("arguments"))
+                returning = key in closed
+                seg_keys.add(key)
+                calls.append((when, f"{d}#{seg}", d, name, key, returning))
     return calls
 
 
 # Commands that are *meant* to repeat: state polling, listing, health checks.
 #
 # Fixed 2026-09-23. The first version of this filter never matched anything:
-#   (1) the pattern ended in a literal `\b` instead of a word boundary, so even
+#   (1) the pattern ended in a literal backslash-b instead of a word boundary, so even
 #       `ls -la` failed to match - 0 of 1051 repeated run commands were excluded;
 #   (2) it was anchored at `^`, missing the common `cd x && ls -la` form;
 #   (3) its curl branch required `/dev/null` in a fixed position, missing health checks.
-# The headline consequence: "polling excluded: 0" was printed as if it were a finding
-# when it actually meant the exclusion step never ran.
+# The consequence: "polling excluded: 0" was printed as if it were a finding, when it
+# actually meant the exclusion step never ran.
 #
-# New rule, auditable: split the command on `&&` / `||` / `;` / `|` and require **every**
-# segment to be state-reading. One segment doing real work (python / npm / git commit)
-# makes the whole command non-trivial: `cd /x && ls -la` is polling, `python x.py | tail -3` is not.
+# New rule, auditable: split the command on `&&` / `||` / `;` / `|` and require every
+# segment to be state-reading. One segment doing real work makes the whole command
+# non-trivial: `cd /x && ls -la` is polling, `python x.py | tail -3` is not.
 _POLL_SEG = re.compile(
     r"^\s*(cd|ls|pwd|ps|top|df|du|date|whoami|id|env|which|tail|head|wc|sleep|echo|true|"
     r"stat|lsof|pgrep|nc\s+-z|git\s+(status|log|diff|rev-parse|branch)|launchctl\s+list)\b"
@@ -167,13 +202,12 @@ def is_trivial(key) -> bool:
 
 def report(calls, detail: bool = False):
     by_key = defaultdict(list)
-    for when, seg, sess, name, key in calls:
+    for when, seg, sess, name, key, returning in calls:
         by_key[key].append((when, seg, sess, name))
 
-    # Group per session. The first version grouped keys globally, so two windows each
-    # reading the same file once counted as one 'repeat' - that is two agents doing
-    # their own work, not one agent repeating itself. It inflated the baseline ~6x
-    # (1524 vs 243). Both numbers are printed so older observations stay comparable.
+    # Group per session, not globally: two windows each reading the same file is two
+    # agents doing their own work, not one agent repeating itself. Global grouping
+    # inflated the count ~6x (1524 vs 244). Both are printed for comparability.
     per_window, global_cross = [], []
     gmap = defaultdict(list)
     same = []
@@ -189,20 +223,25 @@ def report(calls, detail: bool = False):
         if len(hits) >= 2 and len({h[1] for h in hits}) > 1:
             global_cross.append((key, hits))
 
+    n_calls = len(calls)
+    n_ret = sum(1 for c in calls if c[5])
+    rate = 1000.0 * n_ret / max(n_calls, 1)
     print("=== repeated labour across segments ===")
-    print("  unit: same (tool + arguments) recurring in different segments")
-    print(f"  tool calls scanned: {len(calls):,}")
-    print(f"    - within a segment          : {len(same)}   (re-checking, not counted)")
-    print(f"    - **cross-segment, same window: {len(per_window)}**   <- headline")
-    print(f"    - cross-segment, global     : {len(global_cross)}   (legacy grouping, kept for comparison)")
+    print(f"  unit: same (tool + arguments) recurring in a different segment")
+    print(f"  tool calls scanned: {n_calls:,}")
+    print(f"    - within a segment            : {len(same)}   (re-checking, not counted)")
+    print(f"    - **cross-segment, same window  : {len(per_window)}**   <- stock, not a trend")
+    print(f"    - cross-segment, global       : {len(global_cross)}   (legacy grouping, kept for comparison)")
+    print(f"  **returning calls per 1000 (use THIS as the trend): {rate:.1f}**"
+          f"({n_ret}/{n_calls})")
 
-    # 把"本来就该反复跑"的命令单独算：轮询类的重复不是重复劳动
+    # Separate commands that are supposed to repeat; polling is not repeated labour.
     meaningful = [(k, h) for k, h in per_window if not is_trivial(k[1])]
     trivial = [(k, h) for k, h in per_window if is_trivial(k[1])]
-    print(f"    - after removing polling    : **{len(meaningful)}**")
-    print(f"    - polling commands excluded : {len(trivial)}")
+    print(f"    - after removing polling      : **{len(meaningful)}**")
+    print(f"    - polling commands excluded   : {len(trivial)}")
     if trivial:
-        print("      (this filter matched nothing before 2026-09-23)")
+        print(f"      (this filter matched nothing before 2026-09-23)")
 
     kinds = defaultdict(int)
     for (sess, key), _ in meaningful:
@@ -210,19 +249,25 @@ def report(calls, detail: bool = False):
     if kinds:
         print(f"  by type: {dict(kinds)}")
 
-    # Per day: the backfill patch landed 2026-09-23 12:40 local; only later days compare.
-    per_day = defaultdict(lambda: [0, 0])
-    for (sess, key), hits in meaningful:
-        days = sorted({h[0].strftime("%m-%d") for h in hits if h[0]})
-        for d in days:
+    # Reworked 2026-09-23: the previous per-day table could not judge the side effect.
+    # It credited "spans days" to every day except the group's last, so new repeats were
+    # booked against old rows (one real group spans 09-11..09-23 and was credited to
+    # 09-11) - a table that always reads "getting worse". Now: per-day incidence.
+    per_day = defaultdict(lambda: [0, 0])       # day -> [calls, returning calls]
+    for when, seg, sess, name, key, returning in calls:
+        if not when:
+            continue
+        d = when.strftime("%m-%d")
+        per_day[d][0] += 1
+        if returning:
             per_day[d][1] += 1
-        if len(days) > 1:
-            for d in days[:-1]:
-                per_day[d][0] += 1
-    print("\n  per day (groups spanning days / groups seen that day):")
-    for d in sorted(per_day)[-10:]:
-        a, b = per_day[d]
-        print(f"    {d}  spanning {a:>4} / seen {b:>4}")
+    print("\n  per day (returning / calls = per 1000):")
+    for d in sorted(per_day)[-12:]:
+        tot, ret = per_day[d]
+        r = 1000.0 * ret / max(tot, 1)
+        bar = "█" * min(40, int(r / 5))
+        print(f"    {d}  {ret:>4}/{tot:<5} = {r:>5.1f}  {bar}")
+    print("    (the patch landed 2026-09-23 12:40; compare windows after it against windows before it)")
     if detail:
         print("\n=== cross-segment repeats (same window, polling excluded) ===")
         for (sess, key), hits in sorted(meaningful, key=lambda kv: -len(kv[1]))[:40]:
@@ -231,28 +276,28 @@ def report(calls, detail: bool = False):
                 t = when.strftime("%m-%d %H:%M") if when else "?"
                 print(f"      {t}  seg {seg.split(chr(35))[-1]:<3}")
             if len(hits) > 8:
-                print(f"      …还有 {len(hits)-8} 次")
-    return len(cross), len(same)
+                print(f"      ... {len(hits)-8} more")
+    return len(meaningful), len(same)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="跨轮重复劳动（形状 B）")
+    ap = argparse.ArgumentParser(description="repeated labour across segments")
     ap.add_argument("--detail", action="store_true")
-    ap.add_argument("--since", default="", help="只看这个本地时刻之后，如 2026-09-23T12:40")
-    ap.add_argument("--session", default="", help="只看会话 id 含这个字串的（如 REDACTED-SESSION）")
+    ap.add_argument("--since", default="", help="only after this local time, e.g. 2026-09-23T12:40")
+    ap.add_argument("--session", default="", help="only sessions whose id contains this")
     args = ap.parse_args()
     since = None
     if args.since:
         try:
             since = datetime.fromisoformat(args.since).replace(tzinfo=TZ)
         except Exception:
-            print(f"看不懂 --since {args.since}（要 2026-09-23T12:40 这种）")
+            print(f"cannot parse --since {args.since} (want 2026-09-23T12:40)")
             return 2
-        print(f"（只看 {since.strftime('%m-%d %H:%M')} 之后）")
+        print(f"(only after {since.strftime('%m-%d %H:%M')})")
     calls = scan(since)
     if args.session:
         calls = [c for c in calls if args.session in c[2]]
-        print(f"（只看会话含 {args.session} 的）")
+        print(f"(only sessions containing {args.session})")
     report(calls, detail=args.detail)
     return 0
 

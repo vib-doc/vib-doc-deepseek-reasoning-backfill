@@ -245,40 +245,58 @@ plausible cost is **repeated labour** — re-reading a file, re-running a comman
 re-deriving something it already concluded. That is measurable, which is the only
 reason it is acceptable to take the risk.
 
-`tools/repeat_labor_report.py` counts tool calls whose key (tool + arguments) recurs in
-**different segments**, **within the same session**, excluding polling commands (`ls`,
-`ps`, `git status`, health checks) which are *supposed* to repeat:
+`tools/repeat_labor_report.py` builds a key for every tool call (tool + arguments) and
+reports two numbers. **Only one of them can be used as a trend**, and getting this wrong
+is easy:
+
+| number | what it is | usable as a trend? |
+|---|---|---|
+| **groups** | keys appearing in more than one segment | **No.** A group is a property of the whole history; the total grows with the archive, so it "rises" forever |
+| **returning calls / 1000 calls** | a call whose key already appeared in an earlier segment **of the same session** | **Yes.** Denominator is that day's calls, so archive growth does not move it |
 
 ```
-tool calls scanned: 16,846
-  within a segment          : 184   (normal re-checking)
-  cross-segment, same window: 243   <- headline
-  cross-segment, global     : 1524  (legacy grouping; counts two windows each
-                                     reading the same file once as a "repeat")
-  polling excluded          : 4
+tool calls scanned: 16,887
+  within a segment            : 184   (re-checking, not counted)
+  cross-segment, same window  : 244   <- stock, not a trend
+  cross-segment, global       : 1525  (legacy grouping; counts two windows each
+                                       reading the same file once as a "repeat")
+  polling commands excluded   : 4
 
-by type: {'read': 187, 'edit': 3, 'run': 33, 'job_output': 7, 'list_agents': 5, ...}
+returning calls per 1000      : 91.3
 
-per day (groups spanning days / groups seen that day):
-  09-20  10/15   09-21  10/25   09-22  5/20   09-23  0/8
+per day (returning / calls = per 1000):
+  09-17    3/154  =  19.5      09-21  108/1110 =  97.3
+  09-18    1/72   =  13.9      09-22   48/843  =  56.9
+  09-19    0/62   =   0.0      09-23   13/281  =  46.3
+  09-20   28/746  =  37.5
 ```
 
-Two grouping choices matter, and both were wrong in the first draft of this tool:
+Three traps were hit while building this, all of which produced confidently wrong reads:
 
-* **Per session, not global.** Two windows each reading the same file is not one agent
-  repeating itself — it is two agents doing their own work. The global number (1,524) is
-  ~6× the real one (243). The tool now prints both so older observations stay comparable.
-* **The polling filter was a no-op** until it was fixed: the pattern ended in a literal
-  `\b` instead of a word boundary, so it matched nothing at all (including `ls`), and it
-  was additionally anchored at `^` (missing `cd x && ls`) and required `curl … /dev/null`
-  in a fixed order. Net effect: "polling excluded: 0" was reported as if it were a
-  finding, when it actually meant the step never ran.
+* **Grouping keys globally** counted two windows each reading the same file once as one
+  "repeat". That is two agents doing their own work, not one agent repeating itself —
+  it inflated the number ~6× (1,524 vs 244).
+* **A per-day table that credited "spans days" to every day except the group's last.**
+  The last day of any group could therefore never receive credit, so **new repeats were
+  booked against old rows** — a table that reads "it is getting worse" no matter what
+  happens. (One real group spans 09-11 … 09-23 and was credited to 09-11.) Replaced by
+  the per-day rate.
+* **A polling filter that matched nothing.** The pattern ended in a literal `\b` instead
+  of a word boundary (so even `ls -la` failed to match), was anchored at `^` (missing the
+  common `cd x && ls` form), and its curl branch required `/dev/null` in a fixed position.
+  The line "polling excluded: 0" was a no-op reported as a finding.
+
+Recommended use: fix a baseline, then re-run over the window since the last check and
+compare **rates**, not totals.
+
+```
+baseline (before the change, one session):  50 cross-segment groups
+every few days:  --since <last check>   ->  read returning calls per 1000
+```
 
 Read it as a trend, not a verdict: reading a file twice is not automatically waste (it
 may have changed, or it may be a deliberate re-check). This counts **traces**; a human
-decides what they mean. For one long session the pre-deployment baseline is **~50
-cross-segment repeat groups, dominated by re-reads (39 read / 6 run)**. **If that number
-climbs after deploying `patch_backfill.py`, revert.**
+decides what they mean. **If the rate climbs after deploying `patch_backfill.py`, revert.**
 
 ---
 
