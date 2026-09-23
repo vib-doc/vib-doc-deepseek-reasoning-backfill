@@ -41,6 +41,12 @@ Limitations worth stating
 * a matched pair only exists for steps that were retried **and then** produced a reply;
   steps that exhausted the retry budget have no successful partner, and are excluded from
   comparison 2 (they still count in comparison 1);
+* **one pair per (session, turn, step), using the FIRST swallowed attempt.** A single step
+  can be swallowed several times before it succeeds - measured here: 6 attempts for one
+  step, 4 for three others, 2 for two more (35 attempts across 19 distinct steps). Because
+  the paired table has one row per step, a reader who takes the *last* attempt instead gets
+  the same row count but different values, and may reasonably suspect the table is wrong.
+  The choice is therefore stated here, and printed by the tool, rather than left implicit;
 * sample sizes are small (tens of chains, tens of pairs). Treat the direction as the
   finding, not the third digit;
 * the metric is a proxy for "re-examining what was already examined" - it will also rise
@@ -93,7 +99,14 @@ def _stream_reasoning(stream) -> str:
 
 
 def repetition_rate(text: str, n: int = 5) -> float:
-    """Percentage of character n-grams that are duplicates (the paper's rumination metric)."""
+    """Percentage of character n-grams that are duplicates (the paper's rumination metric).
+
+    ⚠️ **Whitespace is stripped before counting** (including newlines). This choice moves
+    the number by ~8 points on this data - 20.7 / 20.8 stripped vs 28.3 / 28.8 unstripped
+    for the matched pairs - so it has to be stated, not assumed. Both versions support the
+    same conclusion (the two groups do not separate), but a reader comparing against their
+    own implementation needs to know which convention produced these figures.
+    """
     t = re.sub(r"\s+", "", text or "")
     if len(t) < n:
         return 0.0
@@ -258,6 +271,8 @@ def main() -> int:
         good_m.append(metrics(v["good"][0], words))
 
     keys = list(bad_m[0].keys())
+    print(f"\n  one pair per (session, turn, step) using the FIRST attempt; 5-gram and shingle")
+    print(  "  rates are computed with whitespace stripped")
     print(f"\n  {'metric':<20}{'swallowed':>12}{'successful':>12}{'separates?':>12}")
     separated = []
     for k in keys:

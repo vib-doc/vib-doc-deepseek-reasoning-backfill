@@ -110,7 +110,8 @@ The relevant published finding is *DeepSeek-R1 Thoughtology*
 
 Their operational definition of rumination is worth quoting because it is directly
 measurable: the **5-gram repetition rate** of the reasoning chain (their Figure 3.3b
-plots it per task, range 0–35%). They also note that *"a high time spent in
+plots it per task, range 0–35%; the figures below strip whitespace before counting, see
+§2's matched-pair table). They also note that *"a high time spent in
 reconstruction does not necessarily mean high rumination"* — duration is not the signal,
 repetition is.
 
@@ -132,7 +133,14 @@ not only `EMPTY_RESPONSE`; 29 of the 31 in this session were `EMPTY_RESPONSE`):
   length, line count, longest repeated-line run, tail repetition share, 20-char shingle
   repetition, 5-gram repetition (the paper's rumination measure), and self-referential
   word density — then reports how many differ by more than 20% of the larger median.
-  Measured: **0 of 7**.
+  Measured: **0 of 7**. Two conventions matter and are stated rather than assumed:
+  **one pair per (session, turn, step), using the first swallowed attempt** — one step was
+  swallowed 6 times, three others 4 times, two more twice (35 attempts over 19 steps), and
+  taking the last attempt instead changes the values while keeping the same row count, which
+  is exactly the kind of thing that makes a reader suspect the table; and **5-gram /
+  shingle rates are computed with whitespace stripped**, a choice worth ~8 points here
+  (20.7 / 20.8 stripped vs 28.3 / 28.8 unstripped — both support the same conclusion, but
+  an independent implementation needs to know which convention produced these figures).
 
   ```
   metric                 swallowed  successful  separates?
