@@ -30,6 +30,14 @@ their reasoning.** Everything older is stripped.
   * tool-calling messages in the current segment: reasoning kept — that is the
     "why am I calling this tool" working state.
 
+**How long that state survives: one turn.** Because the segment boundary *is* the final
+reply, the next turn begins with every message of the previous turn behind `segStart`.
+So the reasoning of a turn's tool steps is available while that turn is still running,
+and stripped from every later turn. There is **no cross-turn continuity of tool
+reasoning**: if a task spans several turns, the model re-derives its plan from the
+visible replies and tool results. That is the cost side of the trade, and
+`tools/repeat_labor_report.py` exists to measure it.
+
 Overrides, highest priority first: `force` file (`on`/`off`/`auto`) → a marker at
 the start of the user's message (`【工作】` / `【聊天】`, stripped before sending) →
 the rule above.

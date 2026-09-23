@@ -194,6 +194,28 @@ alternatives: always-on is right 59.9% of the time, always-off 40.1%, previous-s
 * the fuel is cut where it is thickest: the long, reflective reasoning lives on the
   *final reply* side of a segment, and none of it enters history.
 
+**How long reasoning actually survives — say it precisely.** Because the segment
+boundary *is* the final reply, the next turn starts with every message of the previous
+turn behind `segStart`. So:
+
+> **Reasoning lives exactly one turn.** It is kept for the tool steps of the turn that
+> produced it (so the tool loop keeps its "why am I calling this" working state), and
+> it is stripped from every earlier turn — including the tool steps of those turns.
+
+An earlier draft of this note claimed the model "can still see why it fetched something
+last time". **That was wrong**, and it matters for what you expect to observe: there is
+**no cross-turn tool-reasoning continuity** in this design. If a task spans several
+turns and the user says "continue", the model re-derives its plan from the visible
+replies and tool *results*, not from its previous reasoning. That is the cost side of
+the trade, and it is what the §4 measurement is meant to catch.
+
+Measured directly (a two-turn sequence, first turn has a tool step):
+
+```
+turn 1 in progress   [tool step, final reply]              -> tool step's reasoning KEPT (segStart = 0)
+turn 2 begins        [t1 tool step, t1 reply, t2 tool step]-> false, false, TRUE
+```
+
 ### Measured effect
 
 ```
@@ -224,24 +246,39 @@ re-deriving something it already concluded. That is measurable, which is the onl
 reason it is acceptable to take the risk.
 
 `tools/repeat_labor_report.py` counts tool calls whose key (tool + arguments) recurs in
-**different segments**, excluding polling commands (`ls`, `ps`, `git status`, health
-checks) which are *supposed* to repeat:
+**different segments**, **within the same session**, excluding polling commands (`ls`,
+`ps`, `git status`, health checks) which are *supposed* to repeat:
 
 ```
-tool calls scanned: 3,508
-  across segments : 50
-  within a segment: 85   (normal re-checking)
-  polling excluded: 0
-  => headline: 50 cross-segment repeat groups
-  by type: {'read': 39, 'run': 6, 'job_output': 3, 'edit': 1, 'list_agents': 1}
+tool calls scanned: 16,846
+  within a segment          : 184   (normal re-checking)
+  cross-segment, same window: 243   <- headline
+  cross-segment, global     : 1524  (legacy grouping; counts two windows each
+                                     reading the same file once as a "repeat")
+  polling excluded          : 4
 
-per day:   09-20  6    09-21  5    09-22  2    09-23  0
+by type: {'read': 187, 'edit': 3, 'run': 33, 'job_output': 7, 'list_agents': 5, ...}
+
+per day (groups spanning days / groups seen that day):
+  09-20  10/15   09-21  10/25   09-22  5/20   09-23  0/8
 ```
+
+Two grouping choices matter, and both were wrong in the first draft of this tool:
+
+* **Per session, not global.** Two windows each reading the same file is not one agent
+  repeating itself — it is two agents doing their own work. The global number (1,524) is
+  ~6× the real one (243). The tool now prints both so older observations stay comparable.
+* **The polling filter was a no-op** until it was fixed: the pattern ended in a literal
+  `\b` instead of a word boundary, so it matched nothing at all (including `ls`), and it
+  was additionally anchored at `^` (missing `cd x && ls`) and required `curl … /dev/null`
+  in a fixed order. Net effect: "polling excluded: 0" was reported as if it were a
+  finding, when it actually meant the step never ran.
 
 Read it as a trend, not a verdict: reading a file twice is not automatically waste (it
 may have changed, or it may be a deliberate re-check). This counts **traces**; a human
-decides what they mean. The pre-deployment baseline is ~0–6 groups/day, dominated by
-re-reads. **If that number climbs after deploying `patch_backfill.py`, revert.**
+decides what they mean. For one long session the pre-deployment baseline is **~50
+cross-segment repeat groups, dominated by re-reads (39 read / 6 run)**. **If that number
+climbs after deploying `patch_backfill.py`, revert.**
 
 ---
 
