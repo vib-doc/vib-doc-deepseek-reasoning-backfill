@@ -3,6 +3,9 @@
 **Reasoning emitted, content never produced — and what `reasoning_content` backfill has
 to do with it.**
 
+> 中文版：[`README.zh.md`](README.zh.md) —— translated from this file at commit `c54bd31`.
+> **This English text is canonical**; where the two disagree, this one wins.
+
 A field note from running a long-lived assistant on DeepSeek Harness + `deepseek-flash`
 with tools enabled. Everything below is measured on real traffic. **The scripts that
 produce each number are in this repo; the session archives they read are not** — the
