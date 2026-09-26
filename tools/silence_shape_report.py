@@ -85,7 +85,7 @@ def _iter_archives():
 def _read(f: Path):
     """Decompress one archive and yield parsed events (skipping undecodable lines)."""
     raw = subprocess.run(["zstd", "-dc", str(f)], capture_output=True).stdout.decode("utf-8", "replace")
-    for ln in raw.splitlines():
+    for ln in raw.split("\n"):  # 用 \n 切：splitlines() 会在 U+2028 上误切
         if '"type"' not in ln:
             continue
         try:

@@ -90,7 +90,7 @@ def _load_events(path: Path):
     """One session archive -> [events], keeping only the types we judge on."""
     raw = subprocess.run(["zstd", "-dc", str(path)], capture_output=True).stdout.decode("utf-8", "replace")
     out = []
-    for ln in raw.splitlines():
+    for ln in raw.split("\n"):  # 用 \n 切：splitlines() 会在 U+2028 上误切
         if '"tool/call"' not in ln and '"assistant/message"' not in ln:
             continue
         try:
