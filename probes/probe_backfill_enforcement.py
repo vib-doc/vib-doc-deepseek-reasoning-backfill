@@ -25,6 +25,23 @@ Both probes returned **HTTP 200**. No 400.
   [C] tool-calling turn, assistant message WITHOUT reasoning_content  → 200
   [A] ordinary turn,     assistant message WITHOUT reasoning_content  → 200
 
+⚠️ **The conclusion first drawn from this — "the server does not enforce it" — was
+wrong, and the error is in this file.** Case C's tool-calling message sits *behind a
+later user turn*:
+
+    user -> assistant(tool_calls) -> tool -> user      <- the stripped message is in a
+                                                          PAST segment
+
+By the scoping measured later (`probe_backfill_position.py`, 2026-10-12), that is the
+**permitted** case, so a 200 here is exactly what the docs predict — this request never
+exercised the shape the docs describe. Put the same message in the *open* segment and it
+is a 400, every time. Run that probe instead; it isolates position and includes the
+controls this one lacks.
+
+Kept as-is on purpose: a probe that misled its own authors is worth more in the record
+than a probe that was quietly fixed. The one-line fix, if you want it locally, is to
+drop the final user message from case C.
+
 Caveat, stated plainly: that is **one model, one endpoint, sampled once**. It does
 not prove the field is optional forever, or on other models. Treat it as "the server
 did not enforce this on <date>", and keep a way to revert.

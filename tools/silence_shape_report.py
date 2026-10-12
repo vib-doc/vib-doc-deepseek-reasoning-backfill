@@ -64,9 +64,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Archive-selection rule lives in tools/dsh_archive.py (2026-09-30):
+# never hardcode an archive generation — see that file's docstring.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dsh_archive import latest_for, iter_archives  # noqa: E402
+
 SESSIONS = Path(os.environ.get("DSH_SESSIONS_DIR", Path.home() / ".dsh" / "sessions"))
 TZ = timezone(timedelta(hours=8))
-ARCHIVE_NAME = "session.v3.jsonl.zstd"
 
 
 def _iter_archives():
@@ -77,7 +81,8 @@ def _iter_archives():
         if not sd.is_dir():
             continue
         for d in sorted(os.listdir(sd)):
-            f = sd / d / ARCHIVE_NAME
+            # newest generation (v4 > v3 > unversioned), never a hardcoded one
+            f = latest_for(sd / d)
             if f.exists():
                 yield f
 

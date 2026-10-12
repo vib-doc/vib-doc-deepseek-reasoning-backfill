@@ -96,8 +96,17 @@ The DeepSeek docs are explicit ([Thinking Mode](https://api-docs.deepseek.com/gu
 > previous turns **should be passed back** to the API and **will be concatenated into
 > the context**.
 
-So in any tool-using agent loop, **the model re-reads its own past reasoning on every
-request**. Two consequences:
+**Read with its scope, which the docs do not state and this repo measured.** The
+requirement is not "the request carries `tools`", and it is not "all previous turns".
+It is per message, and it stops at the segment boundary — see §3, where the probe is.
+The short version, because it is what every number below depends on:
+
+> **A tool-calling assistant message must carry `reasoning_content` unless a later
+> user message closes its segment.**
+
+So in any tool-using agent loop, **the model re-reads its own past reasoning while a turn
+is in progress** — and keeps re-reading it, turn after turn, unless the client folds it
+out. Two consequences:
 
 1. **Cost.** Measured here: ~**280,000 tokens per request**, the overwhelming majority
    of it cache reads of accumulated reasoning.
@@ -188,16 +197,42 @@ controls.
 ### The probe first: is the docs' "must" enforced?
 
 The docs threaten a 400 if reasoning is not fully passed back. That claim decides
-whether a client is *allowed* to fold old reasoning out. So we tested it
-(`probes/probe_backfill_enforcement.py`, two requests):
+whether a client is *allowed* to fold old reasoning out. So we tested it —
+(`probes/probe_backfill_position.py`, six requests; re-run it, it is cheap):
 
 ```
-[C tool-turn, reasoning stripped]  HTTP 200   ← docs say this must be 400
-[A plain turn, reasoning stripped] HTTP 200
+A plain turn,                          stripped      HTTP 200
+B tool-turn, ACTIVE segment,           stripped      HTTP 400   <- docs are right
+C tool-turn, PAST segment,             stripped      HTTP 200   <- ...but only there
+D tool-turn, ACTIVE segment,           backfilled    HTTP 200   (control for B)
+E 2-step segment, EARLIER tool step,   stripped      HTTP 400   <- the rule does not loosen
+F 2-step segment, both tool steps,     backfilled    HTTP 200   (control for E)
 ```
 
-**The server did not enforce it.** Stated with its limits: one model, one endpoint,
-sampled once. It does not mean the field will stay optional — keep the `--revert` path.
+**B and C are byte-identical except for one trailing user message**, and that single
+message flips 400 → 200. So the requirement is real, per message, and **scoped to the
+open segment**:
+
+> **A tool-calling assistant message must carry `reasoning_content` unless a later
+> `user` message closes its segment. Inside the open segment, *every* tool-call
+> message must carry it — not just the latest one (E).**
+
+Which is exactly the rule §3's v3 implements — so the narrowing is legal, and E says it
+is also the *tightest* legal rule: it cannot be narrowed further to "only the latest
+tool call". Two consequences worth stating, since both were gotten wrong here first:
+
+* **An earlier draft of this note reported "the server did not enforce it."** That came
+  from `probes/probe_backfill_enforcement.py`, whose tool-calling message sat **behind a
+  later user turn** — i.e. its case C was the *permitted* case. The probe was not wrong
+  about its own request; the conclusion drawn from it was wrong about the server.
+  The old probe is kept in the repo as the record of the mistake, and its header now
+  points here.
+* **"The payload has a `tools` parameter" and "the message has `tool_calls`" are
+  different claims**, and neither is the requirement. What matters is the message field
+  *and* whether a user turn has since closed its segment.
+
+Limits, stated rather than implied: one model, one endpoint, one day, n=1 per cell.
+It does not mean the field will stay optional — keep the `--revert` path.
 
 ### Three designs, two of which failed structurally
 
@@ -418,7 +453,11 @@ decides what they mean. **If the rate climbs after deploying `patch_backfill.py`
 ## 5. Using the pieces
 
 ```bash
-# 1. test whether the API still tolerates reduced backfill on your model/endpoint
+# 1. test whether the API still scopes reduced backfill the way §3 measured
+#    (six requests, prints a 400/200 table; the one to run)
+DEEPSEEK_API_KEY=sk-... python3 probes/probe_backfill_position.py
+
+# 1b. the earlier probe, kept only as the record of a wrong conclusion — see §3
 DEEPSEEK_API_KEY=sk-... python3 probes/probe_backfill_enforcement.py
 
 # 2. look at your own swallowed replies
@@ -453,6 +492,43 @@ Overrides, highest priority first:
 | `~/.dsh/backfill_mode` = `on` / `off` / `auto` | forces the mode for A/B comparison |
 | `【工作】` / `【聊天】` at the start of a user message | per-segment override; stripped before sending |
 | the rule | per-message, as described in §3 |
+
+### Before you trust any number: the archive generation trap
+
+Every tool here reads DSH session archives. **DSH changed its archive filename when it
+migrated its session format, and it does not delete or rewrite the old file** — it
+publishes `session.v4.jsonl.zstd` next to a `session.v3.jsonl.zstd` that is now frozen
+at the migration moment. So any script that hardcodes a generation name **keeps
+returning data and keeps exiting 0, while silently showing you nothing recent.**
+
+This was not hypothetical. Re-running one tool against the same machine on 2026-10-12,
+changing nothing but the filename it opens:
+
+```
+hardcoded `session.v3.jsonl.zstd`  ->  111 swallowed responses, newest 09-27
+newest generation present           ->  152 swallowed responses, newest 10-10
+```
+
+**41 swallowed replies were invisible, with no error and no warning.** The v3 file even
+still existed and still parsed — it was simply frozen a month earlier. Any "it got
+better lately" or "no incidents since <date>" read off a stale generation is an
+artifact of the filename, not a finding.
+
+`tools/dsh_archive.py` is the one place that decides which file to open; the tools
+import `latest_for()` / `iter_archives()` from it rather than naming a file. Two rules
+in it are worth copying even if you don't use this repo:
+
+* **Take the highest generation by version *number*.** `sorted(glob(...))[-1]` compares
+  filenames lexicographically, which happens to work for v3 vs v4 and breaks silently
+  the day a v10 appears.
+* **An archive generation is not an identity.** The migration inserts a synthetic
+  `turn/end` for each interrupted turn, which shifts every later `seq` by +1 (measured;
+  one archive shifted by +2). Anything keying on `seq` — a dedup ledger, a "have I seen
+  this" set — must be re-keyed when the generation changes. Prefer keying on content.
+
+If you adapt these tools to your own archives, make the tool **print which file it
+opened** and assert it is not stale. The failure mode here is a confident, well-formed,
+one-month-old answer.
 
 ---
 
