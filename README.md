@@ -452,6 +452,13 @@ decides what they mean. **If the rate climbs after deploying `patch_backfill.py`
 
 ## 5. Using the pieces
 
+> [!IMPORTANT]
+> **`patches/patch_backfill.py` does not run on DSH 0.2.0-rc.2 or later.** Upstream
+> renamed the functions it anchors on (see *Status of the vendor patch* below). It
+> fails closed — it reports the anchors as missing and changes nothing — so it is
+> safe to run, but it will not do anything useful. The measurement half of this
+> repo is unaffected.
+
 ```bash
 # 1. test whether the API still scopes reduced backfill the way §3 measured
 #    (six requests, prints a 400/200 table; the one to run)
@@ -465,6 +472,7 @@ python3 tools/silence_shape_report.py --shape            # per-attempt shapes
 python3 tools/silence_shape_report.py --watch            # log turns that produced nothing
 
 # 3. apply the narrowed backfill to DeepSeek Harness (restart required)
+#    ⚠️ 0.1.5-rc.2 ONLY — see "Status of the vendor patch" before running this
 python3 patches/patch_backfill.py --check
 python3 patches/patch_backfill.py
 python3 patches/patch_backfill.py --revert               # undo
@@ -492,6 +500,49 @@ Overrides, highest priority first:
 | `~/.dsh/backfill_mode` = `on` / `off` / `auto` | forces the mode for A/B comparison |
 | `【工作】` / `【聊天】` at the start of a user message | per-segment override; stripped before sending |
 | the rule | per-message, as described in §3 |
+
+### Status of the vendor patch: broken on 0.2.0-rc.2, and here is the diff
+
+Upstream renamed the serializer functions, so **every anchor in `patch_backfill.py`
+misses on 0.2.0-rc.2**. Measured 2026-10-14 against both installed copies:
+
+```
+the patch looks for                         0.2.0-rc.2 actually has
+  function serializeAssistant(message) {      function assistant(
+  function serializeMessages(messages) {      function serialize(
+  function serializeMessagesWithImages(...)   (folded into the above)
+  reasoning.length > 0 ? { reasoning_content: reasonin    (moved)
+```
+
+It fails **closed**, which is the important part: the script reports
+`ANCHORS MISSING - do not touch`, substitutes nothing, and exits without writing. A
+`--check` in a scheduled job is the cheap guard, and on this version it will simply
+keep reporting that the patch is not applicable.
+
+**What that does and does not cost you.** The measurement half of this repo (the
+probes and every `tools/` script) is unaffected — they read archives, not vendor code.
+What you lose is the *narrowed backfill* itself: on 0.2.0-rc.2 this patch can no longer
+be the thing that folds old reasoning out. If you need that behaviour, port the three
+substitutions to the new names, and keep the same discipline the script already
+enforces (each anchor must match exactly once; syntax-check afterwards; one-command
+revert).
+
+**A second failure mode found the same day, worth knowing before you patch anything.**
+Two `npx` installs of the same version can coexist
+(`~/.npm/_npx/<hash>/…`), and the profile tree resolves bundles through symlinks that
+may still point at the **older** one. Measured here:
+
+```
+running process   node ~/.npm/_npx/7eff65a5cfe9d1d1/node_modules/.bin/dsh web
+bundles loaded    ~/.npm/_npx/1e7f6d9597241db0/…        <- the OLD dir, via ~/.dsh/profiles/node_modules
+```
+
+So "is my patch applied?" has **two** answers, one per directory (`--check` printed
+`已打过补丁 ✅` for the old copy and `待打补丁` for the new one, in the same run). If you
+patch, patch **both**, or you have only insured the copy that may not be the one
+running. This is also a live hazard for anything that keys on object identity: a
+`WeakSet` registry in `dsh-llm` is per *module instance*, so two copies loaded at once
+means two registries.
 
 ### Before you trust any number: the archive generation trap
 
@@ -548,7 +599,10 @@ one-month-old answer.
 
 ## 7. Context
 
-* Harness: DeepSeek Harness (`@deepseek-ai/dsh-llm-deepseek` 0.1.5-rc.2)
+* Harness: DeepSeek Harness (`@deepseek-ai/dsh-llm-deepseek`)
+  * **measurements**: taken on `0.1.5-rc.2`
+  * **patch target**: `0.1.5-rc.2` only — the anchors miss on `0.2.0-rc.2` and later;
+    see *Status of the vendor patch* in §5
 * Model: `deepseek-flash`, thinking enabled, `reasoning_effort: max`
 * Scale: one long-lived session, ~680 turns, ~3,500 tool calls
 * Run the scripts from the repository root. They read session archives from

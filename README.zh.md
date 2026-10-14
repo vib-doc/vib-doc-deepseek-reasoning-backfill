@@ -400,6 +400,11 @@ turn 699（v3 下第一个完整轮，16 步）       step 1   166,777
 
 ## 五、怎么用这些零件
 
+> [!IMPORTANT]
+> **`patches/patch_backfill.py` 在 DSH 0.2.0-rc.2 及以后跑不了。** 上游把它锚定的
+> 函数改了名（见下面「vendor patch 的现状」）。它是**失败即停**的 —— 会报「锚找不到」、
+> 一个字都不改，所以跑它是安全的，只是没用。**本仓库的测量那半边不受影响。**
+
 ```bash
 # 1. 测你自己的模型/端点上，API 还容不容忍收窄后的回填
 DEEPSEEK_API_KEY=sk-... python3 probes/probe_backfill_position.py
@@ -409,6 +414,7 @@ python3 tools/silence_shape_report.py --shape            # 每次尝试的形状
 python3 tools/silence_shape_report.py --watch            # 记下「整轮没产出」的回合
 
 # 3. 把收窄后的回填打到 DeepSeek Harness 上（需要重启）
+#    ⚠️ 只适用于 0.1.5-rc.2 —— 跑之前先看下面「vendor patch 的现状」
 python3 patches/patch_backfill.py --check
 python3 patches/patch_backfill.py
 python3 patches/patch_backfill.py --revert               # 撤销
@@ -434,6 +440,44 @@ vendor 补丁会被 `npx` 升级覆盖 —— 那是它的正常失效方式，�
 | `~/.dsh/backfill_mode` = `on` / `off` / `auto` | 强制模式，用于 A/B 对照 |
 | 用户消息开头的 `【工作】` / `【聊天】` | 按段覆盖；发出去之前会被去掉 |
 | 规则本身 | 逐条消息判定，如 §3 所述 |
+
+### vendor patch 的现状：在 0.2.0-rc.2 上已经废了，这是差在哪
+
+上游把序列化函数改了名，于是 **`patch_backfill.py` 的每一个锚在 0.2.0-rc.2 上都不命中**。
+2026-10-14 在两份已安装的副本上都量过：
+
+```
+补丁要找的                                     0.2.0-rc.2 实际叫
+  function serializeAssistant(message) {        function assistant(
+  function serializeMessages(messages) {        function serialize(
+  function serializeMessagesWithImages(...)     （已并进上面那个）
+  reasoning.length > 0 ? { reasoning_content: reasonin    （搬走了）
+```
+
+它是**失败即停**的，这点最要紧：脚本报 `ANCHORS MISSING - do not touch`，
+一处都不替换，直接退出、不写文件。**在一个定时任务里跑 `--check` 是便宜的守卫** ——
+只是在这个版本上它会一直报「补丁不适用」。
+
+**这损失了什么、没损失什么。** 本仓库**测量那半边不受影响**（探针和所有 `tools/` 脚本
+读的是档案，不是 vendor 代码）。丢的是**收窄回填本身**：在 0.2.0-rc.2 上，
+这个补丁不再是那个「把旧推理折出去」的东西了。真需要那个行为，就把那三处替换
+移植到新名字上，并保留脚本本来就强制的纪律（每个锚必须精确命中一次；改完做语法检查；
+一条命令能撤）。
+
+**同一天发现的第二种失效，打补丁之前值得知道。** 同一个版本可以并存**两份 `npx`
+安装**（`~/.npm/_npx/<hash>/…`），而 profile 树是通过符号链接解析 bundle 的，
+那些链接**可能还指着旧的那份**。本机实测：
+
+```
+正在跑的进程   node ~/.npm/_npx/7eff65a5cfe9d1d1/node_modules/.bin/dsh web
+实际加载的 bundle   ~/.npm/_npx/1e7f6d9597241db0/…     ← 旧目录，经由 ~/.dsh/profiles/node_modules
+```
+
+⇒ 于是「我的补丁打上了吗」有**两个**答案，一个目录一个（同一次 `--check` 里，
+旧那份报 `已打过补丁 ✅`、新那份报 `待打补丁`）。要打就**两份都打**，
+否则你只给「可能不是正在跑的那份」上了保险。这对任何**按对象身份取键**的东西
+同样是活的隐患：`dsh-llm` 里那个 `WeakSet` 注册表是**每个模块实例一个**，
+两份同时加载就是两个注册表。
 
 ### ⚠️ 信任何一个数之前：档案代次的坑
 
@@ -481,7 +525,10 @@ vendor 补丁会被 `npx` 升级覆盖 —— 那是它的正常失效方式，�
 
 ## 七、背景
 
-* Harness：DeepSeek Harness（`@deepseek-ai/dsh-llm-deepseek` 0.1.5-rc.2）
+* Harness：DeepSeek Harness（`@deepseek-ai/dsh-llm-deepseek`）
+  * **那些读数**：取自 `0.1.5-rc.2`
+  * **补丁目标**：只有 `0.1.5-rc.2` —— 锚在 `0.2.0-rc.2` 及以后不命中；
+    见 §5「vendor patch 的现状」
 * 模型：`deepseek-flash`，thinking 开启，`reasoning_effort: max`
 * 规模：一个长期会话，约 680 轮，约 3,500 次工具调用
 * 脚本请从仓库根目录运行。它们从 `~/.dsh/sessions/` 读会话档案
